@@ -5,6 +5,7 @@ const helmet = require("helmet");
 const compression = require("compression");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
+const cookieParser = require("cookie-parser");
 const path = require("path");
 require("dotenv").config();
 
@@ -27,27 +28,64 @@ const notFound = require("./middleware/notFound");
 const app = express();
 
 // Security middleware
-app.use(helmet());
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  }),
+);
 
-// Rate limiting
+// CORS configuration - MUST be before rate limiting
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Add origins from environment variables (comma separated)
+    const envOrigins = process.env.ALLOWED_ORIGINS
+      ? process.env.ALLOWED_ORIGINS.split(",")
+      : [];
+
+    // Combine all allowed origins and default dev origins
+    const allowedOrigins = [
+      ...envOrigins,
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "http://127.0.0.1:3000",
+      "http://127.0.0.1:5173",
+    ];
+
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.indexOf(origin) === -1) {
+      // In development, allow all origins
+      if (process.env.NODE_ENV === "development") {
+        return callback(null, true);
+      }
+      var msg =
+        "The CORS policy for this site does not allow access from the specified Origin.";
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
+  credentials: true,
+};
+app.use(cors(corsOptions));
+
+// Rate limiting - higher limit in development
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  message: "Too many requests from this IP, please try again later.",
+  max: process.env.NODE_ENV === "development" ? 1000 : 100, // 1000 in dev, 100 in prod
+  message: {
+    success: false,
+    message: "Too many requests from this IP, please try again later.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 app.use(limiter);
-
-// CORS configuration
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    credentials: true,
-  })
-);
 
 // Body parsing middleware
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(cookieParser());
 
 // Compression middleware
 app.use(compression());
@@ -80,6 +118,7 @@ app.use("/api/agents", agentRoutes);
 app.use("/api/stories", storyRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use("/api/dashboard", require("./routes/dashboard"));
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {

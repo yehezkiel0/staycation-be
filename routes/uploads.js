@@ -1,18 +1,29 @@
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
-const cloudinary = require("cloudinary").v2;
+const path = require("path");
+const fs = require("fs");
 const auth = require("../middleware/auth");
 
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
+// Configure Storage
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = "public/uploads/";
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(
+      null,
+      file.fieldname + "-" + uniqueSuffix + path.extname(file.originalname),
+    );
+  },
 });
 
-// Configure multer for memory storage
-const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
@@ -37,26 +48,13 @@ router.post("/image", [auth, upload.single("image")], async (req, res) => {
       return res.status(400).json({ message: "No file uploaded" });
     }
 
-    // Upload to Cloudinary
-    const result = await new Promise((resolve, reject) => {
-      cloudinary.uploader
-        .upload_stream(
-          {
-            folder: "staycation",
-            transformation: [{ quality: "auto" }, { fetch_format: "auto" }],
-          },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        )
-        .end(req.file.buffer);
-    });
+    // Construct URL for local file
+    const fileUrl = `/uploads/${req.file.filename}`;
 
     res.json({
       message: "Image uploaded successfully",
-      url: result.secure_url,
-      public_id: result.public_id,
+      url: fileUrl,
+      public_id: req.file.filename,
     });
   } catch (error) {
     console.error(error);
@@ -73,32 +71,16 @@ router.post("/images", [auth, upload.array("images", 10)], async (req, res) => {
       return res.status(400).json({ message: "No files uploaded" });
     }
 
-    const uploadPromises = req.files.map((file) => {
-      return new Promise((resolve, reject) => {
-        cloudinary.uploader
-          .upload_stream(
-            {
-              folder: "staycation",
-              transformation: [{ quality: "auto" }, { fetch_format: "auto" }],
-            },
-            (error, result) => {
-              if (error) reject(error);
-              else
-                resolve({
-                  url: result.secure_url,
-                  public_id: result.public_id,
-                });
-            }
-          )
-          .end(file.buffer);
-      });
+    const images = req.files.map((file) => {
+      return {
+        url: `/uploads/${file.filename}`,
+        public_id: file.filename,
+      };
     });
-
-    const results = await Promise.all(uploadPromises);
 
     res.json({
       message: "Images uploaded successfully",
-      images: results,
+      images: images,
     });
   } catch (error) {
     console.error(error);
@@ -138,7 +120,7 @@ router.post(
                     url: result.secure_url,
                     public_id: result.public_id,
                   });
-              }
+              },
             )
             .end(file.buffer);
         });
@@ -154,7 +136,7 @@ router.post(
       console.error(error);
       res.status(500).json({ message: "Upload failed", error: error.message });
     }
-  }
+  },
 );
 
 // @route   POST /api/uploads/avatar
@@ -181,7 +163,7 @@ router.post("/avatar", [auth, upload.single("avatar")], async (req, res) => {
           (error, result) => {
             if (error) reject(error);
             else resolve(result);
-          }
+          },
         )
         .end(req.file.buffer);
     });
@@ -220,7 +202,7 @@ router.post(
             (error, result) => {
               if (error) reject(error);
               else resolve(result);
-            }
+            },
           )
           .end(req.file.buffer);
       });
@@ -234,7 +216,7 @@ router.post(
       console.error(error);
       res.status(500).json({ message: "Upload failed", error: error.message });
     }
-  }
+  },
 );
 
 // @route   DELETE /api/uploads/:public_id

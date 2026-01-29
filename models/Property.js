@@ -332,6 +332,9 @@ propertySchema.virtual("mainImage").get(function () {
 
 // Virtual for formatted price
 propertySchema.virtual("formattedPrice").get(function () {
+  if (!this.price || !this.price.currency || !this.price.amount) {
+      return "N/A";
+  }
   const formatter = new Intl.NumberFormat("id-ID", {
     style: "currency",
     currency: this.price.currency,

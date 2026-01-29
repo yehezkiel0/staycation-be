@@ -181,7 +181,7 @@ const bookingSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  }
+  },
 );
 
 // Indexes
@@ -193,8 +193,8 @@ bookingSchema.index({ checkIn: 1 });
 bookingSchema.index({ checkOut: 1 });
 bookingSchema.index({ createdAt: -1 });
 
-// Generate unique booking ID
-bookingSchema.pre("save", function (next) {
+// Generate unique booking ID and calculate totals before validation
+bookingSchema.pre("validate", function (next) {
   if (!this.bookingId) {
     const timestamp = Date.now().toString(36);
     const random = Math.random().toString(36).substr(2, 5);
@@ -202,7 +202,9 @@ bookingSchema.pre("save", function (next) {
   }
 
   // Calculate total guests
-  this.totalGuests = this.guests.adults + this.guests.children;
+  if (this.guests) {
+    this.totalGuests = (this.guests.adults || 0) + (this.guests.children || 0);
+  }
 
   // Calculate nights
   if (this.checkIn && this.checkOut) {
