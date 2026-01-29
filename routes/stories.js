@@ -56,7 +56,7 @@ router.get("/", async (req, res) => {
     sort[sortBy] = sortOrder === "desc" ? -1 : 1;
 
     const stories = await Story.find(query)
-      .populate("author", "firstName lastName avatar")
+      .populate("author.user", "firstName lastName avatar")
       .sort(sort)
       .limit(limit * 1)
       .skip((page - 1) * limit);
@@ -86,7 +86,7 @@ router.get("/featured", async (req, res) => {
       featured: true,
       published: true,
     })
-      .populate("author", "firstName lastName avatar")
+      .populate("author.user", "firstName lastName avatar")
       .sort({ featuredOrder: 1, createdAt: -1 })
       .limit(parseInt(limit));
 
@@ -112,7 +112,7 @@ router.get("/trending", async (req, res) => {
       published: true,
       createdAt: { $gte: thirtyDaysAgo },
     })
-      .populate("author", "firstName lastName avatar")
+      .populate("author.user", "firstName lastName avatar")
       .sort({ views: -1, likes: -1, createdAt: -1 })
       .limit(parseInt(limit));
 
@@ -129,31 +129,38 @@ router.get("/trending", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     const story = await Story.findById(req.params.id)
-      .populate("author", "firstName lastName avatar bio")
-      .populate("comments.user", "firstName lastName avatar");
+      .populate("author.user", "firstName lastName avatar bio")
+      .populate("engagement.comments.user", "firstName lastName avatar");
 
     if (!story) {
       return res.status(404).json({ message: "Story not found" });
     }
 
+    // Determine if user is author or admin
+    let isAuthor = false;
+    if (req.user && story.author && story.author.user) {
+      const authorId = story.author.user._id
+        ? story.author.user._id.toString()
+        : story.author.user.toString();
+      isAuthor = authorId === req.user.id;
+    }
+    const isAdmin = req.user && req.user.role === "admin";
+
     // If story is not published, only author and admin can view
-    if (
-      !story.published &&
-      (!req.user ||
-        (req.user.id !== story.author._id.toString() &&
-          req.user.role !== "admin"))
-    ) {
+    if (story.status !== "published" && !isAuthor && !isAdmin) {
       return res.status(404).json({ message: "Story not found" });
     }
 
-    // Increment view count
-    story.views += 1;
-    await story.save();
+    // Increment view count asynchronously (fire and forget)
+    // Use findByIdAndUpdate to avoid validation errors on existing docs
+    Story.findByIdAndUpdate(req.params.id, {
+      $inc: { "engagement.views": 1 },
+    }).catch((err) => console.error("Error incrementing views:", err.message));
 
     res.json(story);
   } catch (error) {
-    console.error(error.message);
-    res.status(500).json({ message: "Server error" });
+    console.error("Error in GET /api/stories/:id:", error);
+    res.status(500).json({ message: error.message, stack: error.stack });
   }
 });
 
@@ -192,11 +199,10 @@ router.post(
         readTime,
       } = req.body;
 
-      // Calculate read time if not provided
-      let calculatedReadTime = readTime;
-      if (!calculatedReadTime) {
-        const wordCount = content.split(" ").length;
-        calculatedReadTime = `${Math.ceil(wordCount / 200)} min read`;
+      // Fetch user details for author field
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
       }
 
       const story = new Story({
@@ -204,18 +210,26 @@ router.post(
         excerpt,
         content,
         category,
-        image,
+        featuredImage: {
+          url: image,
+          alt: title,
+        },
         tags,
-        author: req.user.id,
-        published,
+        author: {
+          user: user._id,
+          name: `${user.firstName} ${user.lastName}`,
+          avatar: user.avatar,
+          bio: user.bio,
+        },
+        status: published ? "published" : "draft",
         featured,
-        readTime: calculatedReadTime,
+        // readTime is calculated in pre-save hook
       });
 
       await story.save();
 
       // Populate author details for response
-      await story.populate("author", "firstName lastName avatar");
+      await story.populate("author.user", "firstName lastName avatar");
 
       res.status(201).json({
         message: "Story created successfully",
@@ -225,7 +239,7 @@ router.post(
       console.error(error.message);
       res.status(500).json({ message: "Server error" });
     }
-  }
+  },
 );
 
 // @route   PUT /api/stories/:id
@@ -260,10 +274,14 @@ router.put(
       }
 
       // Check if user owns this story or is admin
-      if (
-        story.author.toString() !== req.user.id &&
-        req.user.role !== "admin"
-      ) {
+      const isAuthor =
+        story.author &&
+        story.author.user &&
+        (story.author.user.toString() === req.user.id ||
+          (story.author.user._id &&
+            story.author.user._id.toString() === req.user.id));
+
+      if (!isAuthor && req.user.role !== "admin") {
         return res.status(403).json({ message: "Access denied" });
       }
 
@@ -291,10 +309,17 @@ router.put(
         }
       }
       if (category) story.category = category;
-      if (image) story.image = image;
+      if (image) {
+        story.featuredImage = {
+          url: image,
+          alt: title || story.title,
+        };
+      }
       if (tags) story.tags = tags;
       if (readTime) story.readTime = readTime;
-      if (published !== undefined) story.published = published;
+      if (published !== undefined) {
+        story.status = published ? "published" : "draft";
+      }
 
       // Only admin can set featured status
       if (featured !== undefined && req.user.role === "admin") {
@@ -306,7 +331,7 @@ router.put(
       await story.save();
 
       // Populate author details for response
-      await story.populate("author", "firstName lastName avatar");
+      await story.populate("author.user", "firstName lastName avatar");
 
       res.json({
         message: "Story updated successfully",
@@ -316,7 +341,7 @@ router.put(
       console.error(error.message);
       res.status(500).json({ message: "Server error" });
     }
-  }
+  },
 );
 
 // @route   DELETE /api/stories/:id
@@ -331,7 +356,14 @@ router.delete("/:id", auth, async (req, res) => {
     }
 
     // Check if user owns this story or is admin
-    if (story.author.toString() !== req.user.id && req.user.role !== "admin") {
+    const isAuthor =
+      story.author &&
+      story.author.user &&
+      (story.author.user.toString() === req.user.id ||
+        (story.author.user._id &&
+          story.author.user._id.toString() === req.user.id));
+
+    if (!isAuthor && req.user.role !== "admin") {
       return res.status(403).json({ message: "Access denied" });
     }
 
@@ -356,25 +388,51 @@ router.post("/:id/like", auth, async (req, res) => {
     }
 
     // Check if user already liked this story
-    const likedIndex = story.likes.indexOf(req.user.id);
+    // Assuming likes are under engagement.likes.users
+    // But previous code accessed story.likes?
+    // Let's check Schema: engagement.likes.users
+
+    // The previous implementation accessed story.likes directly which might be wrong too?
+    // Schema says: engagement: { likes: { count: Number, users: [ObjectId] } }
+
+    // I need to fix the LIKE route too!
+
+    if (!story.engagement)
+      story.engagement = { likes: { count: 0, users: [] } };
+    if (!story.engagement.likes)
+      story.engagement.likes = { count: 0, users: [] };
+
+    const likedIndex = story.engagement.likes.users.indexOf(req.user.id);
 
     if (likedIndex > -1) {
-      // Unlike the story
-      story.likes.splice(likedIndex, 1);
-      await story.save();
+      story.engagement.likes.users.splice(likedIndex, 1);
+      story.engagement.likes.count = Math.max(
+        0,
+        story.engagement.likes.count - 1,
+      );
+
+      // Use findByIdAndUpdate to avoid validation errors
+      await Story.findByIdAndUpdate(req.params.id, {
+        "engagement.likes": story.engagement.likes,
+      });
+
       res.json({
         message: "Story unliked",
         liked: false,
-        likesCount: story.likes.length,
+        likesCount: story.engagement.likes.count,
       });
     } else {
-      // Like the story
-      story.likes.push(req.user.id);
-      await story.save();
+      story.engagement.likes.users.push(req.user.id);
+      story.engagement.likes.count += 1;
+
+      await Story.findByIdAndUpdate(req.params.id, {
+        "engagement.likes": story.engagement.likes,
+      });
+
       res.json({
         message: "Story liked",
         liked: true,
-        likesCount: story.likes.length,
+        likesCount: story.engagement.likes.count,
       });
     }
   } catch (error) {
@@ -402,7 +460,7 @@ router.post(
         return res.status(404).json({ message: "Story not found" });
       }
 
-      if (!story.published) {
+      if (story.status !== "published") {
         return res
           .status(400)
           .json({ message: "Cannot comment on unpublished story" });
@@ -416,14 +474,25 @@ router.post(
         createdAt: new Date(),
       };
 
-      story.comments.push(newComment);
+      if (!story.engagement) story.engagement = {};
+      if (!story.engagement.comments) story.engagement.comments = [];
+
+      story.engagement.comments.push(newComment);
       await story.save();
 
       // Populate the new comment with user details
-      await story.populate("comments.user", "firstName lastName avatar");
+      // Note: we can't populate 'comments.user' on the story directly if it's nested
+      // We might need to fetch the story again or manually construct response
 
-      // Get the newly added comment
-      const addedComment = story.comments[story.comments.length - 1];
+      const populatedStory = await Story.findById(req.params.id).populate(
+        "engagement.comments.user",
+        "firstName lastName avatar",
+      );
+
+      const addedComment =
+        populatedStory.engagement.comments[
+          populatedStory.engagement.comments.length - 1
+        ];
 
       res.status(201).json({
         message: "Comment added successfully",
@@ -433,7 +502,7 @@ router.post(
       console.error(error.message);
       res.status(500).json({ message: "Server error" });
     }
-  }
+  },
 );
 
 // @route   DELETE /api/stories/:storyId/comments/:commentId
@@ -447,7 +516,14 @@ router.delete("/:storyId/comments/:commentId", auth, async (req, res) => {
       return res.status(404).json({ message: "Story not found" });
     }
 
-    const comment = story.comments.id(req.params.commentId);
+    // Find comment in engagement.comments
+    if (!story.engagement || !story.engagement.comments) {
+      return res.status(404).json({ message: "Comment not found" });
+    }
+
+    // Mongoose array doesn't support .id() method on nested subdocuments directly if not loaded as MainDocument
+    // usage: story.engagement.comments.id(id) should work if schema is set up right
+    const comment = story.engagement.comments.id(req.params.commentId);
 
     if (!comment) {
       return res.status(404).json({ message: "Comment not found" });
@@ -458,7 +534,8 @@ router.delete("/:storyId/comments/:commentId", auth, async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    story.comments.pull(req.params.commentId);
+    // Remove comment
+    story.engagement.comments.pull(req.params.commentId);
     await story.save();
 
     res.json({ message: "Comment deleted successfully" });

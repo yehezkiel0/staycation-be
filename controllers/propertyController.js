@@ -1,6 +1,6 @@
-const Property = require("../models/Property");
+const PropertyRepository = require("../repositories/propertyRepository");
 const Category = require("../models/Category");
-const Review = require("../models/Review");
+// const Review = require("../models/Review"); // Not directly used in controller anymore if queries are moved, but keeping if needed for other logic logic not fully moved. Actually Review is unused in current shown code except import.
 const { validationResult } = require("express-validator");
 
 // @desc    Get all properties
@@ -116,18 +116,14 @@ exports.getProperties = async (req, res) => {
       sort["ratings.average"] = -1;
     }
 
-    // Execute query
-    const properties = await Property.find(filter)
-      .populate("category", "name slug")
-      .populate("owner", "firstName lastName avatar")
-      .populate("agent", "user profileImage")
-      .sort(sort)
-      .limit(limit)
-      .skip(startIndex)
-      .select("-__v");
+    // Execute query via Repository
+    const properties = await PropertyRepository.findAll(filter, sort, {
+      limit,
+      skip: startIndex,
+    });
 
-    // Get total count for pagination
-    const total = await Property.countDocuments(filter);
+    // Get total count for pagination via Repository
+    const total = await PropertyRepository.count(filter);
 
     // Pagination result
     const pagination = {};
@@ -168,12 +164,7 @@ exports.getProperties = async (req, res) => {
 // @access  Public
 exports.getMostPicked = async (req, res) => {
   try {
-    const properties = await Property.find({ isPopular: true })
-      .populate("category", "name slug")
-      .populate("agent", "name email avatar")
-      .sort({ createdAt: -1 })
-      .limit(6)
-      .lean();
+    const properties = await PropertyRepository.findMostPicked(6);
 
     res.json({
       success: true,
@@ -195,19 +186,9 @@ exports.getMostPicked = async (req, res) => {
 // @access  Public
 exports.getProperty = async (req, res) => {
   try {
-    const property = await Property.findById(req.params.id)
-      .populate("category", "name slug description")
-      .populate("owner", "firstName lastName avatar email phone")
-      .populate("agent", "user profileImage bio contact")
-      .populate({
-        path: "reviews",
-        populate: {
-          path: "user",
-          select: "firstName lastName avatar",
-        },
-        match: { status: "published" },
-        options: { sort: { publishedAt: -1 }, limit: 10 },
-      });
+    const property = await PropertyRepository.findByIdWithDetails(
+      req.params.id,
+    );
 
     if (!property) {
       return res.status(404).json({
@@ -218,7 +199,7 @@ exports.getProperty = async (req, res) => {
 
     // Increment view count
     property.views += 1;
-    await property.save();
+    await PropertyRepository.save(property);
 
     // Check if user has favorited this property
     let isFavorite = false;
@@ -246,55 +227,51 @@ exports.getProperty = async (req, res) => {
 // @route   POST /api/properties
 // @access  Private (Agent/Admin)
 exports.createProperty = async (req, res) => {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: "Validation error",
-          errors: errors.array(),
-        });
-      }
-
-      // Verify category exists
-      const category = await Category.findById(req.body.category);
-      if (!category) {
-        return res.status(400).json({
-          success: false,
-          message: "Category not found",
-        });
-      }
-
-      // Add owner to property data
-      req.body.owner = req.user.id;
-
-      // If user is an agent, add agent reference
-      if (req.user.role === "agent") {
-        const Agent = require("../models/Agent");
-        const agent = await Agent.findOne({ user: req.user.id });
-        if (agent) {
-          req.body.agent = agent._id;
-        }
-      }
-
-      const property = await Property.create(req.body);
-
-      // Populate the created property
-      await property.populate("category", "name slug");
-      await property.populate("owner", "firstName lastName avatar");
-
-      res.status(201).json({
-        success: true,
-        message: "Property created successfully",
-        data: property,
-      });
-    } catch (error) {
-      res.status(500).json({
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
         success: false,
-        message: "Server error",
-        error: error.message,
+        message: "Validation error",
+        errors: errors.array(),
       });
     }
+
+    // Verify category exists
+    const category = await Category.findById(req.body.category);
+    if (!category) {
+      return res.status(400).json({
+        success: false,
+        message: "Category not found",
+      });
+    }
+
+    // Add owner to property data
+    req.body.owner = req.user.id;
+
+    // If user is an agent, add agent reference
+    if (req.user.role === "agent") {
+      const Agent = require("../models/Agent");
+      const agent = await Agent.findOne({ user: req.user.id });
+      if (agent) {
+        req.body.agent = agent._id;
+      }
+    }
+
+    const property = await PropertyRepository.create(req.body);
+
+    res.status(201).json({
+      success: true,
+      message: "Property created successfully",
+      data: property,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
 };
 
 // @desc    Update property
@@ -302,7 +279,7 @@ exports.createProperty = async (req, res) => {
 // @access  Private (Owner/Agent/Admin)
 exports.updateProperty = async (req, res) => {
   try {
-    let property = await Property.findById(req.params.id);
+    let property = await PropertyRepository.findById(req.params.id);
 
     if (!property) {
       return res.status(404).json({
@@ -322,12 +299,7 @@ exports.updateProperty = async (req, res) => {
       });
     }
 
-    property = await Property.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true,
-    })
-      .populate("category", "name slug")
-      .populate("owner", "firstName lastName avatar");
+    property = await PropertyRepository.update(req.params.id, req.body);
 
     res.status(200).json({
       success: true,
@@ -348,7 +320,7 @@ exports.updateProperty = async (req, res) => {
 // @access  Private (Owner/Admin)
 exports.deleteProperty = async (req, res) => {
   try {
-    const property = await Property.findById(req.params.id);
+    const property = await PropertyRepository.findById(req.params.id);
 
     if (!property) {
       return res.status(404).json({
@@ -368,7 +340,7 @@ exports.deleteProperty = async (req, res) => {
       });
     }
 
-    await property.deleteOne();
+    await PropertyRepository.delete(req.params.id);
 
     res.status(200).json({
       success: true,
@@ -388,7 +360,7 @@ exports.deleteProperty = async (req, res) => {
 // @access  Private
 exports.toggleFavorite = async (req, res) => {
   try {
-    const property = await Property.findById(req.params.id);
+    const property = await PropertyRepository.findById(req.params.id);
 
     if (!property) {
       return res.status(404).json({
@@ -438,7 +410,7 @@ exports.checkAvailability = async (req, res) => {
       });
     }
 
-    const property = await Property.findById(req.params.id);
+    const property = await PropertyRepository.findById(req.params.id);
 
     if (!property) {
       return res.status(404).json({

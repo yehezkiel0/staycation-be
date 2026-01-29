@@ -1,4 +1,4 @@
-const Booking = require("../models/Booking");
+const BookingRepository = require("../repositories/bookingRepository");
 const Property = require("../models/Property");
 const { validationResult } = require("express-validator");
 
@@ -33,8 +33,7 @@ exports.createBooking = async (req, res) => {
       return res.status(404).json({ message: "Property not found" });
     }
 
-    // ... later usage ...
-    // Fallback price calculation if propertyData.price.amount is used or direct propertyData.price number
+    // Fallback price calculation
     const pricePerNight = propertyData.price.amount || propertyData.price || 0;
 
     // Validate dates
@@ -56,7 +55,7 @@ exports.createBooking = async (req, res) => {
     }
 
     // Check availability
-    const existingBooking = await Booking.findOne({
+    const existingBooking = await BookingRepository.findOne({
       property: propertyId,
       status: { $in: ["confirmed", "checked_in"] },
       $or: [
@@ -93,7 +92,7 @@ exports.createBooking = async (req, res) => {
       ? `\n\nPayment Info:\nBank: ${bankName}\nHolder: ${bankHolder}`
       : "";
 
-    const booking = new Booking({
+    const booking = await BookingRepository.create({
       user: req.user.id,
       property: propertyId,
       checkIn: checkInDate,
@@ -118,13 +117,9 @@ exports.createBooking = async (req, res) => {
       },
     });
 
-    await booking.save();
-
-    // Populate property details for response
-    await booking.populate(
-      "property",
-      "name city country imageUrls price type",
-    );
+    // Populate using repository logic/find if needed, or manual refetch.
+    // Since create returns the doc, we can populate directly if it's a mongoose doc.
+    await booking.populate("property", "title location images price type");
 
     res.status(201).json({
       message: "Booking created successfully",
@@ -159,14 +154,10 @@ exports.getBookings = async (req, res) => {
       if (endDate) query.checkIn.$lte = new Date(endDate);
     }
 
-    const bookings = await Booking.find(query)
-      .populate("property", "name city country imageUrls price type")
-      .populate("user", "firstName lastName email")
-      .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
-
-    const total = await Booking.countDocuments(query);
+    const { bookings, total } = await BookingRepository.find(query, {
+      page,
+      limit,
+    });
 
     res.json({
       bookings,
@@ -185,18 +176,17 @@ exports.getBookings = async (req, res) => {
 // @access  Private
 exports.getBookingById = async (req, res) => {
   try {
-    let query = { _id: req.params.id };
-
-    // Regular users can only see their own bookings
-    if (req.user.role !== "admin") {
-      query.user = req.user.id;
-    }
-
-    const booking = await Booking.findOne(query)
-      .populate("property", "name city country imageUrls price type features")
-      .populate("user", "firstName lastName email phone");
+    const booking = await BookingRepository.findByIdWithDetails(req.params.id);
 
     if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    // Check ownership if not admin
+    if (
+      req.user.role !== "admin" &&
+      booking.user._id.toString() !== req.user.id
+    ) {
       return res.status(404).json({ message: "Booking not found" });
     }
 
@@ -214,16 +204,14 @@ exports.getBookingById = async (req, res) => {
 // @access  Private
 exports.cancelBooking = async (req, res) => {
   try {
-    let query = { _id: req.params.id };
-
-    // Regular users can only cancel their own bookings
-    if (req.user.role !== "admin") {
-      query.user = req.user.id;
-    }
-
-    const booking = await Booking.findOne(query);
+    const booking = await BookingRepository.findById(req.params.id);
 
     if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    // Regular users can only cancel their own bookings
+    if (req.user.role !== "admin" && booking.user.toString() !== req.user.id) {
       return res.status(404).json({ message: "Booking not found" });
     }
 
@@ -237,7 +225,7 @@ exports.cancelBooking = async (req, res) => {
         .json({ message: "Cannot cancel completed booking" });
     }
 
-    // Check if cancellation is allowed (e.g., 24 hours before check-in)
+    // Check if cancellation is allowed
     const checkInDate = new Date(booking.checkIn);
     const now = new Date();
     const timeDiff = checkInDate.getTime() - now.getTime();
@@ -254,7 +242,7 @@ exports.cancelBooking = async (req, res) => {
       cancelledAt: new Date(),
       reason: req.body.reason || "Cancelled by user",
     };
-    await booking.save();
+    await BookingRepository.save(booking);
 
     res.json({ message: "Booking cancelled successfully", booking });
   } catch (error) {
@@ -272,7 +260,7 @@ exports.confirmBooking = async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    const booking = await Booking.findById(req.params.id);
+    const booking = await BookingRepository.findById(req.params.id);
 
     if (!booking) {
       return res.status(404).json({ message: "Booking not found" });
@@ -287,7 +275,7 @@ exports.confirmBooking = async (req, res) => {
     booking.status = "confirmed";
     booking.payment.status = "paid";
     booking.confirmationSentAt = new Date();
-    await booking.save();
+    await BookingRepository.save(booking);
 
     res.json({ message: "Booking confirmed successfully", booking });
   } catch (error) {
@@ -305,7 +293,7 @@ exports.checkInBooking = async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    const booking = await Booking.findById(req.params.id);
+    const booking = await BookingRepository.findById(req.params.id);
 
     if (!booking) {
       return res.status(404).json({ message: "Booking not found" });
@@ -318,8 +306,7 @@ exports.checkInBooking = async (req, res) => {
     }
 
     booking.status = "checked_in";
-    // booking.checkedInAt = new Date(); // removed as it wasn't in schema, or adjust schema
-    await booking.save();
+    await BookingRepository.save(booking);
 
     res.json({ message: "Check-in successful", booking });
   } catch (error) {
@@ -337,7 +324,7 @@ exports.checkOutBooking = async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    const booking = await Booking.findById(req.params.id);
+    const booking = await BookingRepository.findById(req.params.id);
 
     if (!booking) {
       return res.status(404).json({ message: "Booking not found" });
@@ -350,8 +337,7 @@ exports.checkOutBooking = async (req, res) => {
     }
 
     booking.status = "completed";
-    // booking.checkedOutAt = new Date();
-    await booking.save();
+    await BookingRepository.save(booking);
 
     res.json({ message: "Check-out successful", booking });
   } catch (error) {
@@ -370,16 +356,14 @@ exports.updatePayment = async (req, res) => {
   }
 
   try {
-    let query = { _id: req.params.id };
-
-    // Regular users can only update their own bookings
-    if (req.user.role !== "admin") {
-      query.user = req.user.id;
-    }
-
-    const booking = await Booking.findOne(query);
+    const booking = await BookingRepository.findById(req.params.id);
 
     if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    // Regular users can only update their own bookings
+    if (req.user.role !== "admin" && booking.user.toString() !== req.user.id) {
       return res.status(404).json({ message: "Booking not found" });
     }
 
@@ -388,15 +372,12 @@ exports.updatePayment = async (req, res) => {
     booking.payment = {
       ...booking.payment,
       method: "bank_transfer",
-      transactionId: proofPayment, // simplified mapping
+      transactionId: proofPayment,
       status: "paid",
       paidAt: new Date(),
     };
 
-    // Note: original code used paymentInfo, but schema has payment object.
-    // Adjusted to match schema better or keep simple.
-
-    await booking.save();
+    await BookingRepository.save(booking);
 
     res.json({
       message: "Payment information updated successfully",
@@ -417,16 +398,12 @@ exports.resetBookings = async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    // Find the latest 50 bookings
-    const latestBookings = await Booking.find()
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .select("_id");
-
+    const latestBookings = await BookingRepository.findLatest(50);
     const latestIds = latestBookings.map((b) => b._id);
 
-    // Delete bookings not in the latest 50
-    const result = await Booking.deleteMany({ _id: { $nin: latestIds } });
+    const result = await BookingRepository.deleteMany({
+      _id: { $nin: latestIds },
+    });
 
     res.json({
       message: `Data cleanup successful. Deleted ${result.deletedCount} old bookings.`,
